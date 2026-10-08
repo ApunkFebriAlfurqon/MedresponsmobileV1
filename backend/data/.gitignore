@@ -1,0 +1,3 @@
+# Keep development accounts and patient request data out of source control.
+*.json
+!.gitignore
