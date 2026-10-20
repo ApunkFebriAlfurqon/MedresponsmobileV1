@@ -54,7 +54,7 @@ function Button({ title, onPress, secondary = false, style, disabled = false }) 
 
 function DataFeedback({ loading, error, onRetry }) {
   if (loading) {
-    return <View style={styles.dataFeedback}><Text style={styles.emptyText}>Memuat data dari server MedRespons…</Text></View>;
+    return <View style={styles.dataFeedback}><ActivityIndicator color={COLORS.teal} size="small" /><Text style={styles.emptyText}>Memuat data dari server MedRespons…</Text></View>;
   }
   if (error) {
     return (
@@ -76,7 +76,7 @@ function SectionTitle({ title, action, onAction }) {
   );
 }
 
-function AuthScreen({ mode, onModeChange, onSubmit, loading, error }) {
+function AuthScreen({ mode, onModeChange, onSubmit, loading, error, showRegisterPrompt }) {
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -112,6 +112,11 @@ function AuthScreen({ mode, onModeChange, onSubmit, loading, error }) {
           </Pressable>
 
           {error ? <Text accessibilityRole="alert" style={styles.authError}>{error}</Text> : null}
+          {showRegisterPrompt ? (
+            <Pressable disabled={loading} onPress={() => onModeChange('register')} accessibilityRole="button">
+              <Text style={styles.authSwitchLink}>Belum punya akun? Daftar dulu</Text>
+            </Pressable>
+          ) : null}
           <Button title={loading ? 'MOHON TUNGGU…' : isRegister ? 'BUAT AKUN' : 'MASUK'} onPress={submit} disabled={loading} style={styles.authSubmit} />
           <View style={styles.authSwitchRow}>
             <Text style={styles.authSwitchText}>{isRegister ? 'Sudah punya akun? ' : 'Belum punya akun? '}</Text>
@@ -213,7 +218,7 @@ function HistoryCard({ item }) {
   );
 }
 
-function RequestScreen({ onBack, onSubmit, isSubmitting }) {
+function RequestScreen({ onBack, onSubmit, isSubmitting, submitError }) {
   const [patient, setPatient] = useState('');
   const [condition, setCondition] = useState('');
   const [location, setLocation] = useState('');
@@ -245,6 +250,7 @@ function RequestScreen({ onBack, onSubmit, isSubmitting }) {
         </Pressable>
         <Field label="Catatan untuk tim medis (opsional)" placeholder="Akses rumah, kondisi khusus, dll." value={notes} onChangeText={setNotes} multiline />
         <View style={styles.dispatchNote}><Text style={styles.dispatchIcon}>⚡</Text><Text style={styles.dispatchText}>Ambulans terdekat akan dihubungi setelah permintaan dikirim.</Text></View>
+        <DataFeedback loading={isSubmitting} error={submitError} onRetry={submit} />
         <Button title={isSubmitting ? 'MENGIRIM PERMINTAAN…' : 'KIRIM PERMINTAAN DARURAT  →'} onPress={submit} disabled={isSubmitting} style={styles.submitButton} />
         <Text style={styles.disclaimer}>Dengan mengirim permintaan, Anda menyetujui penggunaan informasi ini untuk koordinasi layanan darurat.</Text>
       </ScrollView>
@@ -385,6 +391,7 @@ export default function App() {
   const [authMode, setAuthMode] = useState('login');
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState('');
+  const [authRegisterPrompt, setAuthRegisterPrompt] = useState(false);
   const [history, setHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [historyError, setHistoryError] = useState('');
@@ -392,6 +399,7 @@ export default function App() {
   const [facilitiesLoading, setFacilitiesLoading] = useState(false);
   const [facilitiesError, setFacilitiesError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [requestError, setRequestError] = useState('');
   const currentScreen = useMemo(() => {
     if (showRequest) return 'request';
     if (showFacilities) return 'facilities';
@@ -443,6 +451,7 @@ export default function App() {
       const requests = await getEmergencyRequests();
       setHistory(requests);
     } catch (error) {
+      setHistory([]);
       setHistoryError(error.message || 'Gagal memuat data dari server.');
     } finally {
       setHistoryLoading(false);
@@ -455,6 +464,7 @@ export default function App() {
     try {
       setFacilities(await getHealthcareFacilities(search));
     } catch (error) {
+      setFacilities([]);
       setFacilitiesError(error.message || 'Gagal memuat fasilitas medis dari API.');
     } finally {
       setFacilitiesLoading(false);
@@ -479,6 +489,7 @@ export default function App() {
   const submitAuth = async (credentials) => {
     setAuthLoading(true);
     setAuthError('');
+    setAuthRegisterPrompt(false);
     try {
       const session = authMode === 'register'
         ? await registerAccount(credentials)
@@ -496,6 +507,7 @@ export default function App() {
       }
       setAuthToken('');
       setAuthError(error.message || 'Autentikasi gagal. Silakan coba lagi.');
+      setAuthRegisterPrompt(authMode === 'login' && error.status === 401);
     } finally {
       setAuthLoading(false);
     }
@@ -525,6 +537,7 @@ export default function App() {
 
   const sendRequest = async (data) => {
     setIsSubmitting(true);
+    setRequestError('');
     try {
       const item = await createEmergencyRequest(data);
       setHistory((items) => [item, ...items]);
@@ -533,14 +546,14 @@ export default function App() {
       setActiveTab('history');
       Alert.alert('Permintaan terkirim', 'Permintaan bantuan ambulans berhasil dikirim ke server MedRespons.');
     } catch (error) {
-      Alert.alert('Gagal mengirim permintaan', error.message || 'Periksa koneksi dan konfigurasi server, lalu coba lagi.');
+      setRequestError(error.message || 'Periksa koneksi dan konfigurasi server, lalu coba lagi.');
     } finally {
       setIsSubmitting(false);
     }
   };
 
   const renderScreen = () => {
-    if (currentScreen === 'request') return <RequestScreen onBack={() => setShowRequest(false)} onSubmit={sendRequest} isSubmitting={isSubmitting} />;
+    if (currentScreen === 'request') return <RequestScreen onBack={() => setShowRequest(false)} onSubmit={sendRequest} isSubmitting={isSubmitting} submitError={requestError} />;
     if (currentScreen === 'facilities') return <FacilitiesScreen onBack={() => setShowFacilities(false)} facilities={facilities} loading={facilitiesLoading} error={facilitiesError} onRetry={loadFacilities} onSearch={loadFacilities} />;
     if (currentScreen === 'history') return <HistoryScreen history={history} loading={historyLoading} error={historyError} onRefresh={loadHistory} />;
     if (currentScreen === 'plans') return <PlansScreen />;
@@ -555,7 +568,7 @@ export default function App() {
         {!authReady ? (
           <View style={styles.authLoading}><ActivityIndicator color={COLORS.teal} size="large" /><Text style={styles.authLoadingText}>Memeriksa sesi akun…</Text></View>
         ) : !authUser ? (
-          <AuthScreen mode={authMode} onModeChange={(mode) => { setAuthError(''); setAuthMode(mode); }} onSubmit={submitAuth} loading={authLoading} error={authError} />
+          <AuthScreen mode={authMode} onModeChange={(mode) => { setAuthError(''); setAuthRegisterPrompt(false); setAuthMode(mode); }} onSubmit={submitAuth} loading={authLoading} error={authError} showRegisterPrompt={authRegisterPrompt} />
         ) : (
           <>
             {renderScreen()}

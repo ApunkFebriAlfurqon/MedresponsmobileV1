@@ -28,7 +28,7 @@ async function request(path, options = {}) {
       },
     });
   } catch {
-    throw new Error('Tidak dapat terhubung ke server. Periksa alamat API dan koneksi jaringan.');
+    throw new Error('Tidak ada koneksi internet atau server API tidak dapat dijangkau. Periksa koneksi Anda, lalu coba lagi.');
   }
 
   if (!response.ok) {
@@ -39,13 +39,22 @@ async function request(path, options = {}) {
     } catch {
       // Gunakan status HTTP jika respons server bukan JSON.
     }
-    const error = new Error(detail || `Server mengembalikan HTTP ${response.status}.`);
+    const message = response.status >= 500
+      ? `Server sedang mengalami gangguan (HTTP ${response.status}). Silakan coba lagi beberapa saat.`
+      : response.status >= 400
+        ? detail || `Permintaan ditolak server (HTTP ${response.status}). Periksa data lalu coba lagi.`
+        : detail || `Server mengembalikan HTTP ${response.status}.`;
+    const error = new Error(message);
     error.status = response.status;
     throw error;
   }
 
   if (response.status === 204) return null;
-  return response.json();
+  try {
+    return await response.json();
+  } catch {
+    throw new Error('Server mengirim respons yang tidak valid. Silakan coba lagi.');
+  }
 }
 
 function unwrapData(payload) {
