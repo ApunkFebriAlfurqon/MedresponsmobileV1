@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Image,
   KeyboardAvoidingView,
   Linking,
   Platform,
@@ -11,10 +12,14 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  Vibration,
   View,
 } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { Accelerometer } from 'expo-sensors';
+import { CameraView, useCameraPermissions } from 'expo-camera';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import { deleteCapturedPhoto, listCapturedPhotos, saveCapturedPhoto } from './cameraStorage';
 import {
   createEmergencyRequest,
   getCurrentUser,
@@ -83,6 +88,15 @@ function AuthScreen({ mode, onModeChange, onSubmit, loading, error, showRegister
   const [confirmPassword, setConfirmPassword] = useState('');
   const [passwordVisible, setPasswordVisible] = useState(false);
   const isRegister = mode === 'register';
+
+  if (loading) {
+    return (
+      <View style={[styles.authScreen, styles.authPending]}>
+        <ActivityIndicator color={COLORS.teal} size="large" />
+        <Text style={styles.authLoadingText}>Mohon tunggu saja…</Text>
+      </View>
+    );
+  }
 
   const submit = () => {
     const cleanEmail = email.trim().toLowerCase();
@@ -367,15 +381,284 @@ function PlansScreen() {
   );
 }
 
-function ProfileScreen({ user, onLogout }) {
+function AccelerometerScreen({ onBack }) {
+  const [measurement, setMeasurement] = useState(null);
+  const [samples, setSamples] = useState([]);
+  const [motionMagnitude, setMotionMagnitude] = useState(0);
+  const [isMoving, setIsMoving] = useState(false);
+  const [sensorStatus, setSensorStatus] = useState('Sensor belum dijalankan.');
+  const [isRunning, setIsRunning] = useState(false);
+  const subscriptionRef = useRef(null);
+  const mountedRef = useRef(true);
+  const movingRef = useRef(false);
+  const motionThreshold = 2.5;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      subscriptionRef.current?.remove();
+      subscriptionRef.current = null;
+      Vibration.cancel();
+    };
+  }, []);
+
+  const stopSensor = () => {
+    subscriptionRef.current?.remove();
+    subscriptionRef.current = null;
+    movingRef.current = false;
+    setIsMoving(false);
+    Vibration.cancel();
+    setIsRunning(false);
+    setSensorStatus('Sensor dihentikan.');
+  };
+
+  const startSensor = async () => {
+    try {
+      setSensorStatus('Memeriksa akses sensor…');
+      const currentPermission = await Accelerometer.getPermissionsAsync();
+      const permission = currentPermission.granted
+        ? currentPermission
+        : await Accelerometer.requestPermissionsAsync();
+      if (!mountedRef.current) return;
+      if (!permission.granted) {
+        setSensorStatus('Izin sensor tidak diberikan. Periksa pengaturan perangkat.');
+        return;
+      }
+
+      const available = await Accelerometer.isAvailableAsync();
+      if (!mountedRef.current) return;
+      if (!available) {
+        setSensorStatus('Accelerometer tidak tersedia pada perangkat ini.');
+        return;
+      }
+
+      subscriptionRef.current?.remove();
+      Accelerometer.setUpdateInterval(250);
+      movingRef.current = false;
+      setIsMoving(false);
+      subscriptionRef.current = Accelerometer.addListener((data) => {
+        if (!mountedRef.current) return;
+        setMeasurement(data);
+        const values = { x: data.x * 9.81, y: data.y * 9.81, z: data.z * 9.81 };
+        const totalAcceleration = Math.sqrt((data.x ** 2) + (data.y ** 2) + (data.z ** 2)) * 9.81;
+        const movement = Math.abs(totalAcceleration - 9.81);
+        setMotionMagnitude(movement);
+        setSamples((previous) => [...previous, values].slice(-20));
+        console.log(`Accelerometer — X: ${values.x.toFixed(2)}, Y: ${values.y.toFixed(2)}, Z: ${values.z.toFixed(2)} m/s²`);
+
+        if (!movingRef.current && movement >= motionThreshold) {
+          movingRef.current = true;
+          setIsMoving(true);
+          Vibration.vibrate(500);
+          console.log(`Gerakan terdeteksi — ${movement.toFixed(2)} m/s²`);
+        } else if (movingRef.current && movement < motionThreshold * 0.65) {
+          movingRef.current = false;
+          setIsMoving(false);
+          console.log('Gerakan berhenti.');
+        }
+      });
+      setIsRunning(true);
+      setSensorStatus('Accelerometer aktif · pembaruan real-time.');
+    } catch (error) {
+      if (!mountedRef.current) return;
+      setIsRunning(false);
+      setSensorStatus(error.message || 'Sensor tidak dapat diakses.');
+    }
+  };
+
+  return (
+    <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+      <View style={styles.pageHeader}>
+        <Pressable onPress={onBack} style={styles.backButton}><Text style={styles.backText}>‹</Text></Pressable>
+        <View><Text style={styles.eyebrow}>SENSOR PERANGKAT</Text><Text style={styles.pageTitle}>Accelerometer</Text></View>
+      </View>
+      <Text style={styles.pageDescription}>Baca perubahan gerak perangkat secara langsung pada sumbu X, Y, dan Z.</Text>
+      <View style={styles.sensorValues}>
+        {['x', 'y', 'z'].map((axis) => (
+          <View key={axis} style={styles.sensorValueCard}>
+            <Text style={styles.sensorAxis}>{axis.toUpperCase()}</Text>
+            <Text style={styles.sensorValue}>{measurement ? (measurement[axis] * 9.81).toFixed(2) : '—'}</Text>
+            <Text style={styles.sensorUnit}>m/s²</Text>
+          </View>
+        ))}
+      </View>
+      <View style={styles.sensorStatusCard}>
+        <Text style={styles.sensorStatus}>{sensorStatus}</Text>
+        <Text style={styles.sensorHint}>Nilai diperbarui langsung, dikonversi ke m/s², dan dicatat di console.</Text>
+        <View style={[styles.motionNotice, isMoving && styles.motionNoticeActive]}>
+          <Text style={[styles.motionNoticeText, isMoving && styles.motionNoticeTextActive]}>
+            {isMoving ? '〰  Goyang terdeteksi · getaran aktif' : isRunning ? '✓  Siap mendeteksi gerakan' : '○  Mulai sensor untuk mendeteksi gerakan'}
+          </Text>
+        </View>
+        <Text style={styles.motionThresholdText}>Ambang gerakan: {motionThreshold.toFixed(1)} m/s² · terdeteksi: {motionMagnitude.toFixed(2)} m/s²</Text>
+      </View>
+      <View style={styles.sensorChartCard}>
+        <Text style={styles.sensorChartTitle}>Grafik perubahan nilai</Text>
+        {[
+          { axis: 'X', key: 'x', color: COLORS.red },
+          { axis: 'Y', key: 'y', color: COLORS.teal },
+          { axis: 'Z', key: 'z', color: '#3478F6' },
+        ].map(({ axis, key, color }) => {
+          const values = samples.map((sample) => sample[key]);
+          const min = Math.min(...values, -9.81);
+          const max = Math.max(...values, 9.81);
+          const range = max - min || 1;
+          return (
+            <View key={axis} style={styles.sensorChartRow}>
+              <Text style={[styles.sensorChartAxis, { color }]}>{axis}</Text>
+              <View style={styles.sensorChartBars}>
+                {samples.length ? samples.map((sample, index) => (
+                  <View key={`${axis}-${index}`} style={styles.sensorChartSlot}>
+                    <View style={[styles.sensorChartBar, { height: 5 + ((sample[key] - min) / range) * 28, backgroundColor: color }]} />
+                  </View>
+                )) : <Text style={styles.sensorChartEmpty}>Grafik akan tampil saat sensor aktif</Text>}
+              </View>
+            </View>
+          );
+        })}
+        <Text style={styles.sensorChartCaption}>20 pembacaan terakhir · m/s²</Text>
+      </View>
+      <Button
+        title={isRunning ? 'HENTIKAN SENSOR' : 'MULAI MEMBACA SENSOR'}
+        onPress={isRunning ? stopSensor : startSensor}
+        secondary={isRunning}
+      />
+    </ScrollView>
+  );
+}
+
+function CameraScreen({ userId, onBack }) {
+  const [permission, requestPermission] = useCameraPermissions();
+  const [photos, setPhotos] = useState([]);
+  const [databaseLoading, setDatabaseLoading] = useState(true);
+  const [cameraReady, setCameraReady] = useState(false);
+  const [isCapturing, setIsCapturing] = useState(false);
+  const [cameraError, setCameraError] = useState('');
+  const cameraRef = useRef(null);
+  const mountedRef = useRef(true);
+
+  const refreshPhotos = useCallback(async () => {
+    if (Platform.OS === 'web') {
+      setDatabaseLoading(false);
+      return;
+    }
+    try {
+      const savedPhotos = await listCapturedPhotos(userId);
+      if (mountedRef.current) setPhotos(savedPhotos);
+    } catch (error) {
+      if (mountedRef.current) setCameraError(error.message || 'Database lokal tidak dapat dibuka.');
+    } finally {
+      if (mountedRef.current) setDatabaseLoading(false);
+    }
+  }, [userId]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    refreshPhotos();
+    return () => { mountedRef.current = false; };
+  }, [refreshPhotos]);
+
+  const capturePhoto = async () => {
+    if (!cameraRef.current || !cameraReady || isCapturing) return;
+    setIsCapturing(true);
+    setCameraError('');
+    try {
+      const picture = await cameraRef.current.takePictureAsync({ quality: 0.75 });
+      if (!picture?.uri) throw new Error('Foto tidak berhasil diambil.');
+      await saveCapturedPhoto(String(userId), picture.uri);
+      await refreshPhotos();
+    } catch (error) {
+      setCameraError(error.message || 'Foto gagal disimpan ke database lokal.');
+    } finally {
+      if (mountedRef.current) setIsCapturing(false);
+    }
+  };
+
+  const removePhoto = async (photo) => {
+    try {
+      await deleteCapturedPhoto(photo.id, String(userId));
+      await refreshPhotos();
+    } catch (error) {
+      setCameraError(error.message || 'Foto tidak dapat dihapus.');
+    }
+  };
+
+  return (
+    <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+      <View style={styles.pageHeader}>
+        <Pressable onPress={onBack} style={styles.backButton}><Text style={styles.backText}>‹</Text></Pressable>
+        <View><Text style={styles.eyebrow}>DOKUMENTASI LOKAL</Text><Text style={styles.pageTitle}>Kamera</Text></View>
+      </View>
+      <Text style={styles.pageDescription}>Ambil foto untuk menguji fitur kamera. Foto dan catatannya hanya disimpan sementara di perangkat ini, tidak dikirim ke server.</Text>
+
+      {Platform.OS === 'web' ? (
+        <View style={styles.cameraInfoCard}><Text style={styles.cameraInfoText}>Uji kamera dan database lokal tersedia melalui aplikasi Expo Go di perangkat Android atau iOS.</Text></View>
+      ) : !permission?.granted ? (
+        <View style={styles.cameraPermissionCard}>
+          <Text style={styles.cameraPermissionIcon}>▣</Text>
+          <Text style={styles.cameraPermissionTitle}>Izin kamera diperlukan</Text>
+          <Text style={styles.cameraPermissionText}>Izinkan akses kamera agar dapat mengambil foto dokumentasi.</Text>
+          <Button
+            title={permission?.canAskAgain === false ? 'BUKA PENGATURAN PERANGKAT' : 'IZINKAN KAMERA'}
+            onPress={() => permission?.canAskAgain === false ? Linking.openSettings().catch(() => {}) : requestPermission()}
+          />
+        </View>
+      ) : (
+        <>
+          <View style={styles.cameraPreview}>
+            <CameraView
+              ref={cameraRef}
+              style={styles.cameraView}
+              facing="back"
+              mode="picture"
+              onCameraReady={() => setCameraReady(true)}
+              onMountError={(event) => setCameraError(event.nativeEvent.message || 'Kamera tidak dapat dibuka.')}
+            />
+          </View>
+          <Button
+            title={isCapturing ? 'MENYIMPAN FOTO…' : cameraReady ? 'AMBIL FOTO' : 'MENYIAPKAN KAMERA…'}
+            onPress={capturePhoto}
+            disabled={!cameraReady || isCapturing}
+            style={styles.cameraCaptureButton}
+          />
+        </>
+      )}
+
+      {cameraError ? <Text accessibilityRole="alert" style={styles.cameraError}>{cameraError}</Text> : null}
+      <View style={styles.cameraStorageNotice}><Text style={styles.cameraStorageTitle}>Database sementara</Text><Text style={styles.cameraStorageText}>Foto disimpan lokal di perangkat dan metadatanya di SQLite. Hapus foto untuk menghapus datanya.</Text></View>
+      <SectionTitle title="Foto tersimpan" action={photos.length ? `${photos.length} foto` : undefined} />
+      {databaseLoading ? <View style={styles.dataFeedback}><ActivityIndicator color={COLORS.teal} size="small" /><Text style={styles.emptyText}>Memuat foto lokal…</Text></View> : null}
+      {!databaseLoading && !photos.length ? <View style={styles.emptyCard}><Text style={styles.emptyIcon}>▧</Text><Text style={styles.emptyText}>Belum ada foto. Ambil foto untuk mulai menguji fitur.</Text></View> : null}
+      {photos.map((photo) => (
+        <View key={photo.id} style={styles.savedPhotoCard}>
+          <Image source={{ uri: photo.uri }} style={styles.savedPhoto} />
+          <View style={styles.savedPhotoDetails}>
+            <Text style={styles.savedPhotoTitle}>Dokumentasi #{photo.id}</Text>
+            <Text style={styles.savedPhotoDate}>{new Date(photo.createdAt).toLocaleString('id-ID')}</Text>
+            <Pressable onPress={() => removePhoto(photo)} accessibilityRole="button"><Text style={styles.savedPhotoDelete}>Hapus foto</Text></Pressable>
+          </View>
+        </View>
+      ))}
+    </ScrollView>
+  );
+}
+
+function ProfileScreen({ user, onLogout, onOpenAccelerometer, onOpenCamera }) {
   const menu = [
-    ['♙', 'Informasi pribadi'], ['⌖', 'Alamat tersimpan'], ['♧', 'Kontak darurat'], ['?', 'Pusat bantuan'], ['⚙', 'Pengaturan aplikasi'],
+    { icon: '♙', label: 'Informasi pribadi' },
+    { icon: '⌖', label: 'Alamat tersimpan' },
+    { icon: '♧', label: 'Kontak darurat' },
+    { icon: '?', label: 'Pusat bantuan' },
+    { icon: '⌁', label: 'Sensor accelerometer', onPress: onOpenAccelerometer },
+    { icon: '▣', label: 'Kamera dokumentasi', onPress: onOpenCamera },
+    { icon: '⚙', label: 'Pengaturan aplikasi' },
   ];
   return (
     <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
       <View style={styles.pageHeader}><View><Text style={styles.eyebrow}>AKUN ANDA</Text><Text style={styles.pageTitle}>Profil</Text></View></View>
       <View style={styles.profileCard}><View style={styles.avatar}><Text style={styles.avatarText}>{user.fullName.slice(0, 1).toUpperCase()}</Text></View><Text style={styles.profileName}>{user.fullName}</Text><Text style={styles.profileEmail}>{user.email}</Text><Pressable onPress={() => Alert.alert('Profil', 'Akun MedRespons Anda sudah terhubung.')}><Text style={styles.editProfile}>Akun terverifikasi  ✓</Text></Pressable></View>
-      <View style={styles.menuCard}>{menu.map(([icon, label]) => <Pressable key={label} style={styles.menuItem} onPress={() => Alert.alert(label, 'Fitur ini akan tersedia pada pembaruan berikutnya.')}><Text style={styles.menuIcon}>{icon}</Text><Text style={styles.menuLabel}>{label}</Text><Text style={styles.menuChevron}>›</Text></Pressable>)}</View>
+      <View style={styles.menuCard}>{menu.map(({ icon, label, onPress }) => <Pressable key={label} style={styles.menuItem} onPress={onPress || (() => Alert.alert(label, 'Fitur ini akan tersedia pada pembaruan berikutnya.'))}><Text style={styles.menuIcon}>{icon}</Text><Text style={styles.menuLabel}>{label}</Text><Text style={styles.menuChevron}>›</Text></Pressable>)}</View>
       <Pressable style={styles.logoutButton} onPress={onLogout}><Text style={styles.logoutText}>Keluar dari akun</Text></Pressable>
       <Text style={styles.versionText}>MedRespons · Versi 1.0.0</Text>
     </ScrollView>
@@ -386,6 +669,8 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('home');
   const [showRequest, setShowRequest] = useState(false);
   const [showFacilities, setShowFacilities] = useState(false);
+  const [showAccelerometer, setShowAccelerometer] = useState(false);
+  const [showCamera, setShowCamera] = useState(false);
   const [authUser, setAuthUser] = useState(null);
   const [authReady, setAuthReady] = useState(false);
   const [authMode, setAuthMode] = useState('login');
@@ -403,8 +688,10 @@ export default function App() {
   const currentScreen = useMemo(() => {
     if (showRequest) return 'request';
     if (showFacilities) return 'facilities';
+    if (showAccelerometer) return 'accelerometer';
+    if (showCamera) return 'camera';
     return activeTab;
-  }, [activeTab, showFacilities, showRequest]);
+  }, [activeTab, showAccelerometer, showCamera, showFacilities, showRequest]);
 
   useEffect(() => {
     let mounted = true;
@@ -490,6 +777,7 @@ export default function App() {
     setAuthLoading(true);
     setAuthError('');
     setAuthRegisterPrompt(false);
+    setAuthToken('');
     try {
       const session = authMode === 'register'
         ? await registerAccount(credentials)
@@ -500,11 +788,6 @@ export default function App() {
       setAuthUser(session.user);
       setActiveTab('home');
     } catch (error) {
-      try {
-        await logoutAccount();
-      } catch {
-        // The server session will expire if local secure storage failed.
-      }
       setAuthToken('');
       setAuthError(error.message || 'Autentikasi gagal. Silakan coba lagi.');
       setAuthRegisterPrompt(authMode === 'login' && error.status === 401);
@@ -555,40 +838,44 @@ export default function App() {
   const renderScreen = () => {
     if (currentScreen === 'request') return <RequestScreen onBack={() => setShowRequest(false)} onSubmit={sendRequest} isSubmitting={isSubmitting} submitError={requestError} />;
     if (currentScreen === 'facilities') return <FacilitiesScreen onBack={() => setShowFacilities(false)} facilities={facilities} loading={facilitiesLoading} error={facilitiesError} onRetry={loadFacilities} onSearch={loadFacilities} />;
+    if (currentScreen === 'accelerometer') return <AccelerometerScreen onBack={() => setShowAccelerometer(false)} />;
+    if (currentScreen === 'camera') return <CameraScreen userId={authUser.id} onBack={() => setShowCamera(false)} />;
     if (currentScreen === 'history') return <HistoryScreen history={history} loading={historyLoading} error={historyError} onRefresh={loadHistory} />;
     if (currentScreen === 'plans') return <PlansScreen />;
-    if (currentScreen === 'profile') return <ProfileScreen user={authUser} onLogout={signOut} />;
+    if (currentScreen === 'profile') return <ProfileScreen user={authUser} onLogout={signOut} onOpenAccelerometer={() => setShowAccelerometer(true)} onOpenCamera={() => setShowCamera(true)} />;
     return <HomeScreen userName={authUser.fullName} history={history} historyLoading={historyLoading} historyError={historyError} onRefresh={loadHistory} onRequest={() => setShowRequest(true)} onFacilities={() => { setShowFacilities(true); loadFacilities(''); }} onHistory={() => setActiveTab('history')} />;
   };
 
   return (
-    <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
-      <StatusBar barStyle="dark-content" backgroundColor={COLORS.background} />
-      <View style={styles.app}>
-        {!authReady ? (
-          <View style={styles.authLoading}><ActivityIndicator color={COLORS.teal} size="large" /><Text style={styles.authLoadingText}>Memeriksa sesi akun…</Text></View>
-        ) : !authUser ? (
-          <AuthScreen mode={authMode} onModeChange={(mode) => { setAuthError(''); setAuthRegisterPrompt(false); setAuthMode(mode); }} onSubmit={submitAuth} loading={authLoading} error={authError} showRegisterPrompt={authRegisterPrompt} />
-        ) : (
-          <>
-            {renderScreen()}
-            {!showRequest && !showFacilities ? (
-              <View style={styles.tabBar}>
-                {TABS.map((tab) => {
-                  const selected = activeTab === tab.id;
-                  return (
-                    <Pressable key={tab.id} onPress={() => setActiveTab(tab.id)} style={styles.tabItem}>
-                      <Text style={[styles.tabIcon, selected && styles.tabIconSelected]}>{tab.icon}</Text>
-                      <Text style={[styles.tabLabel, selected && styles.tabLabelSelected]}>{tab.label}</Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
-            ) : null}
-          </>
-        )}
-      </View>
-    </SafeAreaView>
+    <SafeAreaProvider>
+      <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
+        <StatusBar barStyle="dark-content" backgroundColor={COLORS.background} />
+        <View style={styles.app}>
+          {!authReady ? (
+            <View style={styles.authLoading}><ActivityIndicator color={COLORS.teal} size="large" /><Text style={styles.authLoadingText}>Memeriksa sesi akun…</Text></View>
+          ) : !authUser ? (
+            <AuthScreen mode={authMode} onModeChange={(mode) => { setAuthError(''); setAuthRegisterPrompt(false); setAuthMode(mode); }} onSubmit={submitAuth} loading={authLoading} error={authError} showRegisterPrompt={authRegisterPrompt} />
+          ) : (
+            <>
+              {renderScreen()}
+              {!showRequest && !showFacilities && !showAccelerometer && !showCamera ? (
+                <View style={styles.tabBar}>
+                  {TABS.map((tab) => {
+                    const selected = activeTab === tab.id;
+                    return (
+                      <Pressable key={tab.id} onPress={() => setActiveTab(tab.id)} style={styles.tabItem}>
+                        <Text style={[styles.tabIcon, selected && styles.tabIconSelected]}>{tab.icon}</Text>
+                        <Text style={[styles.tabLabel, selected && styles.tabLabelSelected]}>{tab.label}</Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              ) : null}
+            </>
+          )}
+        </View>
+      </SafeAreaView>
+    </SafeAreaProvider>
   );
 }
 
@@ -597,6 +884,7 @@ const styles = StyleSheet.create({
   app: { flex: 1, backgroundColor: COLORS.background },
   screen: { flex: 1 },
   authScreen: { flex: 1, backgroundColor: COLORS.background },
+  authPending: { alignItems: 'center', justifyContent: 'center', gap: 12 },
   authContent: { flexGrow: 1, justifyContent: 'center', paddingHorizontal: 25, paddingVertical: 30 },
   authBrandMark: { width: 54, height: 54, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.red, alignSelf: 'center', marginBottom: 10 },
   authBrandIcon: { color: COLORS.white, fontSize: 29, fontWeight: '900' },
@@ -739,6 +1027,47 @@ const styles = StyleSheet.create({
   featureText: { color: '#59677C', fontSize: 10 },
   planButton: { marginTop: 8 },
   profileCard: { alignItems: 'center', backgroundColor: COLORS.white, borderRadius: 20, padding: 22, marginBottom: 14 },
+  cameraPermissionCard: { alignItems: 'center', backgroundColor: COLORS.white, borderRadius: 18, padding: 20, marginBottom: 14, borderWidth: 1, borderColor: COLORS.line },
+  cameraPermissionIcon: { color: COLORS.teal, fontSize: 35, marginBottom: 8 },
+  cameraPermissionTitle: { color: COLORS.ink, fontSize: 14, fontWeight: '900', marginBottom: 6 },
+  cameraPermissionText: { color: COLORS.muted, fontSize: 11, lineHeight: 16, textAlign: 'center', marginBottom: 15 },
+  cameraPreview: { height: 330, overflow: 'hidden', borderRadius: 20, backgroundColor: '#182438', marginBottom: 12 },
+  cameraView: { flex: 1 },
+  cameraCaptureButton: { marginBottom: 14 },
+  cameraInfoCard: { backgroundColor: '#FFF6E7', borderRadius: 14, padding: 14, marginBottom: 14 },
+  cameraInfoText: { color: '#80582D', fontSize: 11, lineHeight: 16 },
+  cameraError: { color: '#B23844', backgroundColor: '#FFF0F0', borderRadius: 11, padding: 11, fontSize: 10, lineHeight: 15, marginBottom: 12 },
+  cameraStorageNotice: { backgroundColor: '#EAF7F5', borderRadius: 14, padding: 13, marginBottom: 17 },
+  cameraStorageTitle: { color: COLORS.ink, fontSize: 11, fontWeight: '900', marginBottom: 4 },
+  cameraStorageText: { color: '#68778B', fontSize: 10, lineHeight: 15 },
+  savedPhotoCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.white, borderRadius: 15, padding: 10, marginBottom: 10, borderWidth: 1, borderColor: COLORS.line },
+  savedPhoto: { width: 82, height: 82, borderRadius: 11, backgroundColor: '#E8EDF4' },
+  savedPhotoDetails: { flex: 1, paddingHorizontal: 12 },
+  savedPhotoTitle: { color: COLORS.ink, fontSize: 11, fontWeight: '800' },
+  savedPhotoDate: { color: COLORS.muted, fontSize: 9, marginTop: 5 },
+  savedPhotoDelete: { color: COLORS.red, fontSize: 10, fontWeight: '800', marginTop: 8 },
+  sensorValues: { flexDirection: 'row', gap: 10, marginBottom: 14 },
+  sensorValueCard: { flex: 1, alignItems: 'center', backgroundColor: COLORS.white, borderRadius: 16, paddingVertical: 18, borderWidth: 1, borderColor: COLORS.line },
+  sensorAxis: { color: COLORS.teal, fontSize: 13, fontWeight: '900' },
+  sensorValue: { color: COLORS.ink, fontSize: 21, fontWeight: '900', marginTop: 7 },
+  sensorUnit: { color: COLORS.muted, fontSize: 9, marginTop: 2 },
+  sensorStatusCard: { backgroundColor: '#EAF7F5', borderRadius: 14, padding: 14, marginBottom: 15 },
+  sensorStatus: { color: COLORS.ink, fontSize: 11, fontWeight: '800' },
+  sensorHint: { color: '#68778B', fontSize: 10, lineHeight: 15, marginTop: 5 },
+  motionNotice: { backgroundColor: '#E8F7F1', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 9, marginTop: 10 },
+  motionNoticeActive: { backgroundColor: '#FFF0F0' },
+  motionNoticeText: { color: '#188365', fontSize: 10, fontWeight: '800' },
+  motionNoticeTextActive: { color: COLORS.red },
+  motionThresholdText: { color: COLORS.muted, fontSize: 9, marginTop: 7 },
+  sensorChartCard: { backgroundColor: COLORS.white, borderRadius: 16, padding: 14, marginBottom: 15, borderWidth: 1, borderColor: COLORS.line },
+  sensorChartTitle: { color: COLORS.ink, fontSize: 12, fontWeight: '800', marginBottom: 12 },
+  sensorChartRow: { flexDirection: 'row', alignItems: 'center', minHeight: 38, marginBottom: 5 },
+  sensorChartAxis: { width: 20, fontSize: 10, fontWeight: '900' },
+  sensorChartBars: { flex: 1, height: 36, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', overflow: 'hidden' },
+  sensorChartSlot: { flex: 1, height: 36, alignItems: 'center', justifyContent: 'center' },
+  sensorChartBar: { width: 4, minHeight: 4, borderRadius: 3, opacity: 0.9 },
+  sensorChartEmpty: { color: COLORS.muted, fontSize: 9 },
+  sensorChartCaption: { color: COLORS.muted, fontSize: 9, textAlign: 'right', marginTop: 2 },
   avatar: { width: 66, height: 66, borderRadius: 23, backgroundColor: '#FDECEE', alignItems: 'center', justifyContent: 'center', marginBottom: 11 },
   avatarText: { color: COLORS.red, fontSize: 27, fontWeight: '900' },
   profileName: { color: COLORS.ink, fontSize: 17, fontWeight: '800' },
