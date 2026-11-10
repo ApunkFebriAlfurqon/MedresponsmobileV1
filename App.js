@@ -29,6 +29,9 @@ import {
   logoutAccount,
   registerAccount,
   setAuthToken,
+  createTodo,
+  getTodos,
+  updateTodoStatus,
 } from './api';
 
 const COLORS = {
@@ -644,7 +647,103 @@ function CameraScreen({ userId, onBack }) {
   );
 }
 
-function ProfileScreen({ user, onLogout, onOpenAccelerometer, onOpenCamera }) {
+function TodoScreen({ onBack }) {
+  const [todos, setTodos] = useState([]);
+  const [title, setTitle] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [busyTodoId, setBusyTodoId] = useState(null);
+  const [error, setError] = useState('');
+
+  const refreshTodos = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      setTodos(await getTodos());
+    } catch (loadError) {
+      setError(loadError.message || 'Todo List gagal dimuat.');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { refreshTodos(); }, [refreshTodos]);
+
+  const addTodo = async () => {
+    const cleanTitle = title.trim();
+    if (!cleanTitle) {
+      Alert.alert('Tugas belum diisi', 'Tulis nama tugas sebelum menambahkan.');
+      return;
+    }
+    setSaving(true);
+    setError('');
+    try {
+      const todo = await createTodo(cleanTitle);
+      setTodos((items) => [todo, ...items]);
+      setTitle('');
+    } catch (addError) {
+      setError(addError.message || 'Tugas gagal ditambahkan.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const toggleTodo = async (todo) => {
+    setBusyTodoId(todo.id);
+    setError('');
+    try {
+      const updated = await updateTodoStatus(todo.id, !todo.completed);
+      setTodos((items) => items.map((item) => item.id === todo.id ? { ...item, completed: updated.completed } : item));
+    } catch (updateError) {
+      setError(updateError.message || 'Status tugas gagal diperbarui.');
+    } finally {
+      setBusyTodoId(null);
+    }
+  };
+
+  return (
+    <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+      <View style={styles.pageHeader}>
+        <Pressable onPress={onBack} style={styles.backButton}><Text style={styles.backText}>‹</Text></Pressable>
+        <View><Text style={styles.eyebrow}>REST API · ASYNC</Text><Text style={styles.pageTitle}>Todo List</Text></View>
+        <Pressable accessibilityRole="button" accessibilityLabel="Muat ulang daftar tugas" onPress={refreshTodos} style={styles.todoRefreshButton}><Text style={styles.todoRefreshText}>↻</Text></Pressable>
+      </View>
+      <Text style={styles.pageDescription}>Daftar tugas dimuat dan diperbarui melalui REST API.</Text>
+      <View style={styles.todoNotice}><Text style={styles.todoNoticeTitle}>API simulasi</Text><Text style={styles.todoNoticeText}>JSONPlaceholder menerima GET, POST, dan PATCH untuk demonstrasi. Perubahan POST dan PATCH tidak disimpan permanen.</Text></View>
+
+      <View style={styles.todoAddRow}>
+        <TextInput
+          accessibilityLabel="Tugas baru"
+          placeholder="Tulis tugas baru…"
+          placeholderTextColor="#9AA5B5"
+          style={styles.todoInput}
+          value={title}
+          onChangeText={setTitle}
+          onSubmitEditing={addTodo}
+          returnKeyType="done"
+          maxLength={120}
+        />
+        <Pressable accessibilityRole="button" onPress={addTodo} disabled={saving} style={[styles.todoAddButton, saving && styles.disabledButton]}>
+          {saving ? <ActivityIndicator color={COLORS.white} size="small" /> : <Text style={styles.todoAddButtonText}>Tambah</Text>}
+        </Pressable>
+      </View>
+
+      {error ? <View style={styles.todoError}><Text style={styles.todoErrorText}>{error}</Text><Pressable onPress={refreshTodos}><Text style={styles.dataRetry}>Coba lagi</Text></Pressable></View> : null}
+      {loading ? <View style={styles.dataFeedback}><ActivityIndicator color={COLORS.teal} /><Text style={styles.emptyText}>Memuat tugas dari server…</Text></View> : null}
+      {!loading && !error && !todos.length ? <View style={styles.emptyLarge}><Text style={styles.emptyIcon}>✓</Text><Text style={styles.emptyTitle}>Belum ada tugas</Text><Text style={styles.emptyText}>Tambahkan tugas baru untuk memulai.</Text></View> : null}
+      {!loading ? todos.map((todo) => (
+        <Pressable key={todo.id} accessibilityRole="checkbox" accessibilityState={{ checked: todo.completed, disabled: busyTodoId === todo.id }} onPress={() => toggleTodo(todo)} disabled={busyTodoId === todo.id} style={styles.todoCard}>
+          <View style={[styles.todoCheckbox, todo.completed && styles.todoCheckboxDone]}>{busyTodoId === todo.id ? <ActivityIndicator size="small" color={COLORS.teal} /> : todo.completed ? <Text style={styles.todoCheckmark}>✓</Text> : null}</View>
+          <Text style={[styles.todoTitle, todo.completed && styles.todoTitleDone]}>{todo.title}</Text>
+          <Text style={[styles.todoStatus, todo.completed && styles.todoStatusDone]}>{todo.completed ? 'Selesai' : 'Belum selesai'}</Text>
+        </Pressable>
+      )) : null}
+      <Text style={styles.todoFootnote}>Tarik ulang data dengan tombol ↻ · Sumber: JSONPlaceholder</Text>
+    </ScrollView>
+  );
+}
+
+function ProfileScreen({ user, onLogout, onOpenAccelerometer, onOpenCamera, onOpenTodos }) {
   const menu = [
     { icon: '♙', label: 'Informasi pribadi' },
     { icon: '⌖', label: 'Alamat tersimpan' },
@@ -652,6 +751,7 @@ function ProfileScreen({ user, onLogout, onOpenAccelerometer, onOpenCamera }) {
     { icon: '?', label: 'Pusat bantuan' },
     { icon: '⌁', label: 'Sensor accelerometer', onPress: onOpenAccelerometer },
     { icon: '▣', label: 'Kamera dokumentasi', onPress: onOpenCamera },
+    { icon: '✓', label: 'Todo List Async', onPress: onOpenTodos },
     { icon: '⚙', label: 'Pengaturan aplikasi' },
   ];
   return (
@@ -671,6 +771,7 @@ export default function App() {
   const [showFacilities, setShowFacilities] = useState(false);
   const [showAccelerometer, setShowAccelerometer] = useState(false);
   const [showCamera, setShowCamera] = useState(false);
+  const [showTodos, setShowTodos] = useState(false);
   const [authUser, setAuthUser] = useState(null);
   const [authReady, setAuthReady] = useState(false);
   const [authMode, setAuthMode] = useState('login');
@@ -690,8 +791,9 @@ export default function App() {
     if (showFacilities) return 'facilities';
     if (showAccelerometer) return 'accelerometer';
     if (showCamera) return 'camera';
+    if (showTodos) return 'todos';
     return activeTab;
-  }, [activeTab, showAccelerometer, showCamera, showFacilities, showRequest]);
+  }, [activeTab, showAccelerometer, showCamera, showFacilities, showRequest, showTodos]);
 
   useEffect(() => {
     let mounted = true;
@@ -840,9 +942,10 @@ export default function App() {
     if (currentScreen === 'facilities') return <FacilitiesScreen onBack={() => setShowFacilities(false)} facilities={facilities} loading={facilitiesLoading} error={facilitiesError} onRetry={loadFacilities} onSearch={loadFacilities} />;
     if (currentScreen === 'accelerometer') return <AccelerometerScreen onBack={() => setShowAccelerometer(false)} />;
     if (currentScreen === 'camera') return <CameraScreen userId={authUser.id} onBack={() => setShowCamera(false)} />;
+    if (currentScreen === 'todos') return <TodoScreen onBack={() => setShowTodos(false)} />;
     if (currentScreen === 'history') return <HistoryScreen history={history} loading={historyLoading} error={historyError} onRefresh={loadHistory} />;
     if (currentScreen === 'plans') return <PlansScreen />;
-    if (currentScreen === 'profile') return <ProfileScreen user={authUser} onLogout={signOut} onOpenAccelerometer={() => setShowAccelerometer(true)} onOpenCamera={() => setShowCamera(true)} />;
+    if (currentScreen === 'profile') return <ProfileScreen user={authUser} onLogout={signOut} onOpenAccelerometer={() => setShowAccelerometer(true)} onOpenCamera={() => setShowCamera(true)} onOpenTodos={() => setShowTodos(true)} />;
     return <HomeScreen userName={authUser.fullName} history={history} historyLoading={historyLoading} historyError={historyError} onRefresh={loadHistory} onRequest={() => setShowRequest(true)} onFacilities={() => { setShowFacilities(true); loadFacilities(''); }} onHistory={() => setActiveTab('history')} />;
   };
 
@@ -858,7 +961,7 @@ export default function App() {
           ) : (
             <>
               {renderScreen()}
-              {!showRequest && !showFacilities && !showAccelerometer && !showCamera ? (
+              {!showRequest && !showFacilities && !showAccelerometer && !showCamera && !showTodos ? (
                 <View style={styles.tabBar}>
                   {TABS.map((tab) => {
                     const selected = activeTab === tab.id;
@@ -961,6 +1064,26 @@ const styles = StyleSheet.create({
   pageDescription: { color: COLORS.muted, fontSize: 12, lineHeight: 18, marginBottom: 17 },
   backButton: { width: 42, height: 42, borderRadius: 14, backgroundColor: COLORS.white, alignItems: 'center', justifyContent: 'center' },
   backText: { color: COLORS.ink, fontSize: 31, lineHeight: 34, marginTop: -4 },
+  todoRefreshButton: { width: 40, height: 40, marginLeft: 'auto', borderRadius: 13, backgroundColor: COLORS.white, alignItems: 'center', justifyContent: 'center' },
+  todoRefreshText: { color: COLORS.teal, fontSize: 25, fontWeight: '800' },
+  todoNotice: { backgroundColor: '#FFF6E7', borderRadius: 14, padding: 13, marginBottom: 15 },
+  todoNoticeTitle: { color: '#80582D', fontSize: 11, fontWeight: '900', marginBottom: 4 },
+  todoNoticeText: { color: '#80582D', fontSize: 10, lineHeight: 15 },
+  todoAddRow: { flexDirection: 'row', gap: 8, marginBottom: 13 },
+  todoInput: { flex: 1, minHeight: 46, backgroundColor: COLORS.white, borderWidth: 1, borderColor: COLORS.line, borderRadius: 12, paddingHorizontal: 13, color: COLORS.ink, fontSize: 12 },
+  todoAddButton: { minWidth: 78, alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.teal, borderRadius: 12, paddingHorizontal: 12 },
+  todoAddButtonText: { color: COLORS.white, fontSize: 11, fontWeight: '900' },
+  todoError: { alignItems: 'center', backgroundColor: '#FFF0F0', borderRadius: 14, padding: 14, marginBottom: 12, gap: 8 },
+  todoErrorText: { color: '#9E3340', fontSize: 10, lineHeight: 15, textAlign: 'center' },
+  todoCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.white, borderWidth: 1, borderColor: COLORS.line, borderRadius: 14, padding: 12, marginBottom: 8, gap: 10, minHeight: 54 },
+  todoCheckbox: { width: 22, height: 22, borderWidth: 1.5, borderColor: '#B9C5D5', borderRadius: 7, alignItems: 'center', justifyContent: 'center' },
+  todoCheckboxDone: { backgroundColor: '#E8F7F1', borderColor: COLORS.teal },
+  todoCheckmark: { color: COLORS.teal, fontSize: 13, fontWeight: '900' },
+  todoTitle: { flex: 1, color: COLORS.ink, fontSize: 11, lineHeight: 16, fontWeight: '600' },
+  todoTitleDone: { color: COLORS.muted, textDecorationLine: 'line-through' },
+  todoStatus: { color: '#9A6B25', backgroundColor: '#FFF6E7', borderRadius: 10, overflow: 'hidden', paddingHorizontal: 7, paddingVertical: 5, fontSize: 8, fontWeight: '800' },
+  todoStatusDone: { color: '#188365', backgroundColor: '#E8F7F1' },
+  todoFootnote: { color: '#9AA5B5', fontSize: 9, lineHeight: 14, textAlign: 'center', marginTop: 9 },
   noticeCard: { flexDirection: 'row', gap: 10, alignItems: 'center', backgroundColor: '#FFF2E6', padding: 13, borderRadius: 14, marginBottom: 20 },
   noticeIcon: { color: '#BE7423', fontSize: 18, fontWeight: '800' },
   noticeText: { color: '#80582D', fontSize: 10, flex: 1, lineHeight: 15 },

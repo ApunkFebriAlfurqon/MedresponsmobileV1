@@ -1,4 +1,5 @@
 const API_BASE_URL = (process.env.EXPO_PUBLIC_API_URL || '').trim().replace(/\/+$/, '');
+const TODO_API_BASE_URL = 'https://jsonplaceholder.typicode.com';
 let authToken = '';
 
 export const isApiConfigured = Boolean(API_BASE_URL);
@@ -17,9 +18,12 @@ async function request(path, options = {}) {
   requireApiUrl();
 
   let response;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
   try {
     response = await fetch(`${API_BASE_URL}${path}`, {
       ...options,
+      signal: controller.signal,
       headers: {
         Accept: 'application/json',
         ...(options.body ? { 'Content-Type': 'application/json' } : {}),
@@ -27,8 +31,13 @@ async function request(path, options = {}) {
         ...options.headers,
       },
     });
-  } catch {
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      throw new Error('Server terlalu lama merespons. Pastikan backend aktif dan alamat API benar, lalu coba lagi.');
+    }
     throw new Error('Tidak ada koneksi internet atau server API tidak dapat dijangkau. Periksa koneksi Anda, lalu coba lagi.');
+  } finally {
+    clearTimeout(timeout);
   }
 
   if (!response.ok) {
@@ -170,4 +179,53 @@ export async function createEmergencyRequest(data) {
     throw new Error('Server tidak mengembalikan data permintaan yang berhasil dibuat.');
   }
   return mapEmergencyRequest(record);
+}
+
+async function todoRequest(path, options = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  let response;
+  try {
+    response = await fetch(`${TODO_API_BASE_URL}${path}`, {
+      ...options,
+      signal: controller.signal,
+      headers: {
+        Accept: 'application/json',
+        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+        ...options.headers,
+      },
+    });
+  } catch (error) {
+    if (error.name === 'AbortError') throw new Error('Server Todo List terlalu lama merespons. Coba lagi.');
+    throw new Error('Todo List tidak dapat terhubung ke server. Periksa koneksi internet Anda.');
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (!response.ok) throw new Error(`Permintaan Todo List gagal (HTTP ${response.status}).`);
+  try {
+    return await response.json();
+  } catch {
+    throw new Error('Server Todo List mengirim respons yang tidak valid.');
+  }
+}
+
+export async function getTodos() {
+  const todos = await todoRequest('/todos?_limit=10');
+  if (!Array.isArray(todos)) throw new Error('Format data Todo List dari server tidak sesuai.');
+  return todos;
+}
+
+export async function createTodo(title) {
+  return todoRequest('/todos', {
+    method: 'POST',
+    body: JSON.stringify({ title, completed: false, userId: 1 }),
+  });
+}
+
+export async function updateTodoStatus(id, completed) {
+  return todoRequest(`/todos/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ completed }),
+  });
 }
