@@ -16,6 +16,8 @@ import {
   View,
 } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
+import * as Location from 'expo-location';
+import MapView, { Circle, Marker, PROVIDER_GOOGLE } from 'react-native-maps';
 import { Accelerometer } from 'expo-sensors';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
@@ -51,6 +53,28 @@ const TABS = [
   { id: 'plans', icon: '◇', label: 'Paket' },
   { id: 'profile', icon: '○', label: 'Profil' },
 ];
+
+const GEOFENCE_RADIUS_METERS = 250;
+
+function distanceBetweenCoordinates(first, second) {
+  const radians = (degrees) => (degrees * Math.PI) / 180;
+  const latitudeDelta = radians(second.latitude - first.latitude);
+  const longitudeDelta = radians(second.longitude - first.longitude);
+  const latitude1 = radians(first.latitude);
+  const latitude2 = radians(second.latitude);
+  const haversine = (Math.sin(latitudeDelta / 2) ** 2)
+    + (Math.cos(latitude1) * Math.cos(latitude2) * (Math.sin(longitudeDelta / 2) ** 2));
+  return 6371000 * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
+}
+
+function formatGeocodedAddress(place) {
+  if (!place) return '';
+  const street = [place.streetNumber, place.street].filter(Boolean).join(' ');
+  const parts = [street, place.district, place.city || place.subregion, place.region, place.postalCode, place.country]
+    .filter(Boolean)
+    .map(String);
+  return [...new Set(parts)].join(', ');
+}
 
 function Button({ title, onPress, secondary = false, style, disabled = false }) {
   return (
@@ -239,7 +263,145 @@ function RequestScreen({ onBack, onSubmit, isSubmitting, submitError }) {
   const [patient, setPatient] = useState('');
   const [condition, setCondition] = useState('');
   const [location, setLocation] = useState('');
+  const [gpsLocation, setGpsLocation] = useState(null);
+  const [liveLocation, setLiveLocation] = useState(null);
+  const [readableAddress, setReadableAddress] = useState('');
+  const [locationLoading, setLocationLoading] = useState(false);
+  const [geocodeLoading, setGeocodeLoading] = useState(false);
+  const [locationError, setLocationError] = useState('');
+  const [geocodeError, setGeocodeError] = useState('');
+  const [locationSettingsRequired, setLocationSettingsRequired] = useState(false);
+  const [geofenceRegion, setGeofenceRegion] = useState(null);
+  const [geofenceStatus, setGeofenceStatus] = useState('inactive');
+  const [geofenceDistance, setGeofenceDistance] = useState(null);
+  const [geofenceError, setGeofenceError] = useState('');
   const [notes, setNotes] = useState('');
+  const mapRef = useRef(null);
+  const geofenceSubscription = useRef(null);
+  const insideGeofenceRef = useRef(null);
+
+  const recenterMap = () => {
+    const position = liveLocation || gpsLocation;
+    if (!position) return;
+    mapRef.current?.animateToRegion({
+      latitude: position.latitude,
+      longitude: position.longitude,
+      latitudeDelta: 0.008,
+      longitudeDelta: 0.008,
+    }, 500);
+  };
+
+  useEffect(() => {
+    recenterMap();
+  }, [gpsLocation]);
+
+  useEffect(() => {
+    if (!geofenceRegion) return undefined;
+    let active = true;
+
+    const watchGeofence = async () => {
+      try {
+        const permission = await Location.getForegroundPermissionsAsync();
+        if (permission.status !== 'granted') throw new Error('Izin lokasi diperlukan untuk memantau area.');
+
+        const subscription = await Location.watchPositionAsync({
+          accuracy: Location.Accuracy.Balanced,
+          distanceInterval: 10,
+          timeInterval: 3000,
+        }, (position) => {
+          if (!active) return;
+          const current = position.coords;
+          const distance = distanceBetweenCoordinates(geofenceRegion, current);
+          const isInside = distance <= GEOFENCE_RADIUS_METERS;
+          setLiveLocation(current);
+          setGeofenceDistance(distance);
+          setGeofenceStatus(isInside ? 'inside' : 'outside');
+
+          if (insideGeofenceRef.current !== null && insideGeofenceRef.current !== isInside) {
+            const message = isInside
+              ? 'Anda memasuki area yang ditentukan.'
+              : 'Anda keluar dari area yang ditentukan.';
+            Alert.alert('Geofencing', message);
+          }
+          insideGeofenceRef.current = isInside;
+        });
+
+        if (active) geofenceSubscription.current = subscription;
+        else subscription.remove();
+      } catch (error) {
+        if (active) setGeofenceError(error.message || 'Pemantauan area tidak dapat dimulai.');
+      }
+    };
+
+    watchGeofence();
+    return () => {
+      active = false;
+      geofenceSubscription.current?.remove();
+      geofenceSubscription.current = null;
+      insideGeofenceRef.current = null;
+    };
+  }, [geofenceRegion]);
+
+  const getCurrentLocation = async () => {
+    setLocationLoading(true);
+    setLocationError('');
+    setLocationSettingsRequired(false);
+    try {
+      let permission = await Location.getForegroundPermissionsAsync();
+      if (permission.status !== 'granted') {
+        permission = await Location.requestForegroundPermissionsAsync();
+      }
+      if (permission.status !== 'granted') {
+        setLocationSettingsRequired(permission.canAskAgain === false);
+        throw new Error('Izin lokasi diperlukan untuk mengambil koordinat GPS.');
+      }
+
+      const servicesEnabled = await Location.hasServicesEnabledAsync();
+      if (!servicesEnabled) throw new Error('Aktifkan layanan lokasi atau GPS pada perangkat, lalu coba lagi.');
+
+      const result = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+      const coordinates = result.coords;
+      setGpsLocation(coordinates);
+      setLiveLocation(coordinates);
+      setLocation(`Koordinat: ${coordinates.latitude.toFixed(6)}, ${coordinates.longitude.toFixed(6)}`);
+      setGeocodeLoading(true);
+      setGeocodeError('');
+      try {
+        const [place] = await Location.reverseGeocodeAsync({ latitude: coordinates.latitude, longitude: coordinates.longitude });
+        const address = formatGeocodedAddress(place);
+        if (!address) throw new Error('Alamat tidak ditemukan untuk koordinat ini.');
+        setReadableAddress(address);
+        setLocation(address);
+      } catch (error) {
+        setReadableAddress('');
+        setGeocodeError(error.message || 'Alamat tidak dapat diperoleh dari koordinat.');
+      } finally {
+        setGeocodeLoading(false);
+      }
+    } catch (error) {
+      setLocationError(error.message || 'Lokasi perangkat tidak dapat diambil. Pastikan GPS aktif lalu coba lagi.');
+    } finally {
+      setLocationLoading(false);
+    }
+  };
+
+  const toggleGeofence = () => {
+    if (geofenceRegion) {
+      setGeofenceRegion(null);
+      setGeofenceDistance(null);
+      setGeofenceStatus('inactive');
+      setGeofenceError('');
+      return;
+    }
+    if (!gpsLocation) {
+      Alert.alert('Lokasi belum tersedia', 'Ambil lokasi GPS terlebih dahulu untuk menentukan pusat area.');
+      return;
+    }
+
+    setGeofenceError('');
+    insideGeofenceRef.current = null;
+    setGeofenceRegion({ latitude: gpsLocation.latitude, longitude: gpsLocation.longitude });
+  };
 
   const submit = () => {
     if (!patient.trim() || !condition.trim() || !location.trim()) {
@@ -261,10 +423,75 @@ function RequestScreen({ onBack, onSubmit, isSubmitting, submitError }) {
         <Field label="Nama pasien" placeholder="Nama lengkap pasien" value={patient} onChangeText={setPatient} />
         <Field label="Kondisi darurat" placeholder="Contoh: sesak napas, kecelakaan" value={condition} onChangeText={setCondition} />
         <Text style={styles.formSectionTitle}>Lokasi penjemputan</Text>
-        <Field label="Alamat lengkap" placeholder="Nama jalan, nomor, kelurahan" value={location} onChangeText={setLocation} />
-        <Pressable style={styles.locationButton} onPress={() => Alert.alert('Lokasi perangkat', 'Pastikan izin lokasi aktif. Untuk saat ini, masukkan alamat penjemputan secara manual.') }>
-          <Text style={styles.locationPin}>⌖</Text><Text style={styles.locationButtonText}>Gunakan lokasi saya</Text><Text style={styles.locationArrow}>›</Text>
+        <View style={styles.gpsLocationCard}>
+          <Text style={styles.gpsLocationTitle}>Lokasi Saat Ini</Text>
+          <View style={styles.gpsCoordinateRow}><Text style={styles.gpsCoordinateLabel}>Latitude</Text><Text style={styles.gpsCoordinateValue}>{gpsLocation ? gpsLocation.latitude.toFixed(6) : '—'}</Text></View>
+          <View style={styles.gpsCoordinateRow}><Text style={styles.gpsCoordinateLabel}>Longitude</Text><Text style={styles.gpsCoordinateValue}>{gpsLocation ? gpsLocation.longitude.toFixed(6) : '—'}</Text></View>
+          <View style={styles.gpsCoordinateRow}><Text style={styles.gpsCoordinateLabel}>Accuracy</Text><Text style={styles.gpsCoordinateValue}>{gpsLocation?.accuracy == null ? '—' : `±${gpsLocation.accuracy.toFixed(1)} m`}</Text></View>
+        </View>
+        {gpsLocation ? (
+          <View style={styles.reverseGeocodeCard}>
+            <Text style={styles.gpsLocationTitle}>Alamat dari Koordinat</Text>
+            {geocodeLoading ? <View style={styles.geocodeLoading}><ActivityIndicator color={COLORS.teal} size="small" /><Text style={styles.reverseGeocodeText}>Mencari alamat…</Text></View> : null}
+            {!geocodeLoading && readableAddress ? <Text style={styles.reverseGeocodeText}>{readableAddress}</Text> : null}
+            {!geocodeLoading && geocodeError ? <Text style={styles.geocodeErrorText}>{geocodeError}</Text> : null}
+          </View>
+        ) : null}
+        <Pressable accessibilityRole="button" accessibilityLabel="Ambil lokasi GPS saat ini" disabled={locationLoading} style={[styles.locationButton, locationLoading && styles.disabledButton]} onPress={getCurrentLocation}>
+          {locationLoading ? <ActivityIndicator color={COLORS.teal} size="small" /> : <Text style={styles.locationPin}>⌖</Text>}
+          <Text style={styles.locationButtonText}>{locationLoading ? 'Mengambil lokasi…' : 'Ambil Lokasi'}</Text>
+          {!locationLoading ? <Text style={styles.locationArrow}>›</Text> : null}
         </Pressable>
+        {gpsLocation ? (
+          <View style={styles.locationMapCard}>
+            <View style={styles.locationMapHeading}><Text style={styles.gpsLocationTitle}>Peta Lokasi</Text><Text style={styles.locationMapCoordinates}>Lat {gpsLocation.latitude.toFixed(4)} · Lng {gpsLocation.longitude.toFixed(4)}</Text></View>
+            <View style={styles.locationMapFrame}>
+              <MapView
+                ref={mapRef}
+                provider={Platform.OS === 'android' ? PROVIDER_GOOGLE : undefined}
+                style={styles.locationMap}
+                initialRegion={{ latitude: gpsLocation.latitude, longitude: gpsLocation.longitude, latitudeDelta: 0.008, longitudeDelta: 0.008 }}
+                showsCompass
+                showsScale
+                toolbarEnabled={false}
+                loadingEnabled
+              >
+                <Marker
+                  coordinate={{ latitude: (liveLocation || gpsLocation).latitude, longitude: (liveLocation || gpsLocation).longitude }}
+                  title="Lokasi Anda"
+                  description={`${(liveLocation || gpsLocation).latitude.toFixed(6)}, ${(liveLocation || gpsLocation).longitude.toFixed(6)}`}
+                />
+                {geofenceRegion ? <Circle center={geofenceRegion} radius={GEOFENCE_RADIUS_METERS} strokeColor="rgba(124, 77, 255, 0.9)" fillColor="rgba(124, 77, 255, 0.18)" strokeWidth={2} /> : null}
+              </MapView>
+              <Pressable accessibilityRole="button" accessibilityLabel="Pusatkan peta ke lokasi saya" onPress={recenterMap} style={styles.mapRecenterButton}>
+                <Text style={styles.mapRecenterText}>◎</Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : null}
+        {gpsLocation ? (
+          <View style={styles.geofenceCard}>
+            <View style={styles.geofenceHeader}>
+              <Text style={styles.gpsLocationTitle}>Geofencing</Text>
+              <Text style={[styles.geofenceStatus, geofenceStatus === 'inside' && styles.geofenceStatusInside, geofenceStatus === 'outside' && styles.geofenceStatusOutside]}>
+                {geofenceStatus === 'inside' ? 'Di dalam area' : geofenceStatus === 'outside' ? 'Di luar area' : 'Nonaktif'}
+              </Text>
+            </View>
+            <Text style={styles.geofenceDescription}>Tentukan area beradius {GEOFENCE_RADIUS_METERS} m dari lokasi GPS. Pemantauan berjalan saat layar ini terbuka.</Text>
+            {geofenceDistance != null ? <Text style={styles.geofenceDistance}>Jarak dari pusat area: {Math.round(geofenceDistance)} m</Text> : null}
+            {geofenceError ? <Text style={styles.geofenceErrorText}>{geofenceError}</Text> : null}
+            <Pressable accessibilityRole="button" onPress={toggleGeofence} style={[styles.geofenceButton, geofenceRegion && styles.geofenceButtonStop]}>
+              <Text style={[styles.geofenceButtonText, geofenceRegion && styles.geofenceButtonStopText]}>{geofenceRegion ? 'Hentikan pemantauan area' : 'Tentukan area di lokasi saya'}</Text>
+            </Pressable>
+          </View>
+        ) : null}
+        {locationError ? (
+          <View style={styles.locationError}>
+            <Text style={styles.locationErrorText}>{locationError}</Text>
+            {locationSettingsRequired ? <Pressable onPress={() => Linking.openSettings().catch(() => {})}><Text style={styles.dataRetry}>Buka pengaturan perangkat</Text></Pressable> : null}
+          </View>
+        ) : null}
+        <Field label="Alamat lengkap" placeholder="Nama jalan, nomor, kelurahan" value={location} onChangeText={setLocation} />
         <Field label="Catatan untuk tim medis (opsional)" placeholder="Akses rumah, kondisi khusus, dll." value={notes} onChangeText={setNotes} multiline />
         <View style={styles.dispatchNote}><Text style={styles.dispatchIcon}>⚡</Text><Text style={styles.dispatchText}>Ambulans terdekat akan dihubungi setelah permintaan dikirim.</Text></View>
         <DataFeedback loading={isSubmitting} error={submitError} onRetry={submit} />
@@ -1092,6 +1319,36 @@ const styles = StyleSheet.create({
   fieldLabel: { color: '#506078', fontSize: 10, fontWeight: '700', marginBottom: 7 },
   input: { backgroundColor: COLORS.white, borderWidth: 1, borderColor: COLORS.line, borderRadius: 12, paddingHorizontal: 13, paddingVertical: 12, color: COLORS.ink, fontSize: 12, minHeight: 45 },
   multilineInput: { minHeight: 82, textAlignVertical: 'top' },
+  gpsLocationCard: { backgroundColor: COLORS.white, borderWidth: 1, borderColor: COLORS.line, borderRadius: 16, padding: 14, marginBottom: 10 },
+  gpsLocationTitle: { color: COLORS.ink, fontSize: 13, fontWeight: '800', marginBottom: 8 },
+  gpsCoordinateRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 8, borderTopWidth: 1, borderTopColor: '#F0F3F8' },
+  gpsCoordinateLabel: { color: '#536178', fontSize: 11, fontWeight: '600' },
+  gpsCoordinateValue: { color: COLORS.ink, fontSize: 11, fontWeight: '800' },
+  reverseGeocodeCard: { backgroundColor: '#F4F0FF', borderRadius: 14, padding: 13, marginBottom: 12 },
+  reverseGeocodeText: { color: '#4F3B87', fontSize: 11, lineHeight: 17 },
+  geocodeLoading: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  geocodeErrorText: { color: '#9E3340', fontSize: 10, lineHeight: 15 },
+  locationMapCard: { backgroundColor: COLORS.white, borderWidth: 1, borderColor: COLORS.line, borderRadius: 16, padding: 12, marginBottom: 14 },
+  locationMapHeading: { marginBottom: 9 },
+  locationMapCoordinates: { color: COLORS.muted, fontSize: 9, marginTop: 3 },
+  locationMapFrame: { height: 230, borderRadius: 13, overflow: 'hidden', position: 'relative' },
+  locationMap: { flex: 1 },
+  mapRecenterButton: { position: 'absolute', right: 12, bottom: 12, width: 42, height: 42, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.white, elevation: 3 },
+  mapRecenterText: { color: COLORS.teal, fontSize: 25, fontWeight: '800' },
+  geofenceCard: { backgroundColor: COLORS.white, borderWidth: 1, borderColor: COLORS.line, borderRadius: 16, padding: 14, marginBottom: 14 },
+  geofenceHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 6 },
+  geofenceStatus: { color: COLORS.muted, backgroundColor: '#F0F3F8', borderRadius: 10, overflow: 'hidden', paddingHorizontal: 8, paddingVertical: 5, fontSize: 9, fontWeight: '800' },
+  geofenceStatusInside: { color: '#188365', backgroundColor: '#E8F7F1' },
+  geofenceStatusOutside: { color: '#9A6B25', backgroundColor: '#FFF6E7' },
+  geofenceDescription: { color: COLORS.muted, fontSize: 10, lineHeight: 15 },
+  geofenceDistance: { color: COLORS.ink, fontSize: 10, fontWeight: '700', marginTop: 7 },
+  geofenceErrorText: { color: '#9E3340', fontSize: 10, lineHeight: 15, marginTop: 7 },
+  geofenceButton: { alignItems: 'center', justifyContent: 'center', backgroundColor: '#7650D8', borderRadius: 11, minHeight: 42, paddingHorizontal: 12, marginTop: 11 },
+  geofenceButtonStop: { backgroundColor: '#FFF0F0' },
+  geofenceButtonText: { color: COLORS.white, fontSize: 10, fontWeight: '900' },
+  geofenceButtonStopText: { color: '#9E3340' },
+  locationError: { backgroundColor: '#FFF0F0', borderRadius: 12, padding: 11, marginTop: -7, marginBottom: 12, gap: 7 },
+  locationErrorText: { color: '#9E3340', fontSize: 10, lineHeight: 15 },
   locationButton: { flexDirection: 'row', alignItems: 'center', gap: 9, backgroundColor: '#EAF7F5', borderRadius: 12, paddingHorizontal: 13, paddingVertical: 12, marginTop: -4, marginBottom: 17 },
   locationPin: { color: COLORS.teal, fontSize: 19 },
   locationButtonText: { flex: 1, color: COLORS.teal, fontWeight: '800', fontSize: 11 },

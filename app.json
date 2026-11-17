@@ -17,6 +17,12 @@
       "expo-status-bar",
       "expo-sqlite",
       [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Izinkan MedRespons mengakses lokasi saat aplikasi digunakan untuk menentukan titik penjemputan."
+        }
+      ],
+      [
         "expo-camera",
         {
           "cameraPermission": "Izinkan MedRespons menggunakan kamera untuk mengambil foto dokumentasi.",
