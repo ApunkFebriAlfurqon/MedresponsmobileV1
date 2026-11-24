@@ -181,6 +181,63 @@ const authRateLimit = rateLimit({
   legacyHeaders: false,
   message: { error: 'TooManyRequests', message: 'Terlalu banyak percobaan. Tunggu beberapa menit lalu coba lagi.' },
 });
+const pushRateLimit = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 5,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: { error: 'TooManyRequests', message: 'Terlalu banyak permintaan notifikasi. Coba lagi sebentar.' },
+});
+
+async function sendExpoPushNotifications(tokens, { title, body, data }) {
+  const tickets = [];
+  for (let index = 0; index < tokens.length; index += 100) {
+    const messages = tokens.slice(index, index + 100).map(({ token }) => ({
+      to: token,
+      sound: 'default',
+      title,
+      body,
+      data,
+    }));
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    let response;
+    try {
+      response = await fetch('https://exp.host/--/api/v2/push/send', {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Accept-Encoding': 'gzip, deflate',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(messages),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      const message = error.name === 'AbortError'
+        ? 'Layanan push notification terlalu lama merespons.'
+        : 'Tidak dapat terhubung ke layanan push notification.';
+      throw Object.assign(new Error(message), { status: 502 });
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    if (!response.ok) {
+      throw Object.assign(new Error(`Layanan push notification menolak permintaan (HTTP ${response.status}).`), { status: 502 });
+    }
+    let payload;
+    try {
+      payload = await response.json();
+    } catch {
+      throw Object.assign(new Error('Layanan push notification mengirim respons yang tidak valid.'), { status: 502 });
+    }
+    if (!Array.isArray(payload.data)) {
+      throw Object.assign(new Error(payload.errors?.[0]?.message || 'Respons layanan push notification tidak sesuai.'), { status: 502 });
+    }
+    tickets.push(...payload.data);
+  }
+  return tickets;
+}
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', service: 'medrespons-backend', timestamp: new Date().toISOString() });
@@ -250,6 +307,79 @@ app.post('/api/auth/logout', authenticate, (req, res) => {
   res.json({ data: { message: 'Berhasil logout.' } });
 });
 
+app.post('/api/push-tokens', authenticate, async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const token = cleanString(body.token, 'token', 512, { required: true });
+    const platform = cleanString(body.platform, 'platform', 20, { required: true });
+    if (!/^(Expo|Exponent)PushToken\[[A-Za-z0-9_-]+\]$/.test(token)) {
+      throw Object.assign(new Error('Expo push token tidak valid.'), { status: 400 });
+    }
+    if (!['ios', 'android'].includes(platform)) {
+      throw Object.assign(new Error('Platform harus berupa ios atau android.'), { status: 400 });
+    }
+
+    users = users.map((user) => {
+      const pushTokens = Array.isArray(user.pushTokens) ? user.pushTokens : [];
+      const withoutThisToken = pushTokens.filter((entry) => entry.token !== token);
+      if (user.id === req.user.id) {
+        return {
+          ...user,
+          pushTokens: [...withoutThisToken, { token, platform, updatedAt: new Date().toISOString() }],
+        };
+      }
+      return withoutThisToken.length === pushTokens.length ? user : { ...user, pushTokens: withoutThisToken };
+    });
+    await persistUsers();
+    return res.status(200).json({ data: { registered: true } });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post('/api/push-notifications/test', authenticate, pushRateLimit, async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const title = cleanString(body.title, 'title', 120, { required: true });
+    const message = cleanString(body.body, 'body', 2000, { required: true });
+    const data = body.data === undefined ? { screen: 'history' } : body.data;
+    if (!data || typeof data !== 'object' || Array.isArray(data) || Buffer.byteLength(JSON.stringify(data)) > 4096) {
+      throw Object.assign(new Error('Data notifikasi harus berupa objek JSON maksimal 4 KB.'), { status: 400 });
+    }
+    const tokens = (Array.isArray(req.user.pushTokens) ? req.user.pushTokens : [])
+      .filter((entry) => entry && typeof entry.token === 'string');
+    if (!tokens.length) {
+      return res.status(409).json({ error: 'DeviceNotRegistered', message: 'Belum ada perangkat terdaftar untuk menerima notifikasi.' });
+    }
+
+    const tickets = await sendExpoPushNotifications(tokens, { title, body: message, data });
+    const failedTickets = tickets.filter((ticket) => ticket.status === 'error');
+    if (failedTickets.length) {
+      const invalidTokens = new Set();
+      tickets.forEach((ticket, index) => {
+        if (ticket.status === 'error' && ticket.details?.error === 'DeviceNotRegistered' && tokens[index]) {
+          invalidTokens.add(tokens[index].token);
+        }
+      });
+      if (invalidTokens.size) {
+        users = users.map((user) => user.id === req.user.id
+          ? { ...user, pushTokens: (user.pushTokens || []).filter((entry) => !invalidTokens.has(entry.token)) }
+          : user);
+        await persistUsers();
+      }
+    }
+    return res.json({
+      data: {
+        sent: tickets.filter((ticket) => ticket.status === 'ok').length,
+        failed: failedTickets.length,
+        tickets,
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
 app.get('/api/emergency-requests', authenticate, (req, res) => {
   const status = typeof req.query.status === 'string' ? req.query.status : '';
   const ownedRequests = requests.filter((item) => item.userId === req.user.id);
@@ -310,6 +440,7 @@ app.use((error, _req, res, _next) => {
 
 await loadRequests();
 watchJsonFile(DATA_FILE, 'Request', (data) => { requests = data; });
+watchJsonFile(USERS_FILE, 'User', (data) => { users = data; });
 watchJsonFile(FACILITIES_FILE, 'Healthcare facility', (data) => { facilities = data; });
 app.listen(PORT, HOST, () => {
   console.log(`MedRespons API listening on http://${HOST}:${PORT}`);

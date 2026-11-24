@@ -17,6 +17,9 @@ import {
 } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import * as Location from 'expo-location';
+import * as Notifications from 'expo-notifications';
+import Constants from 'expo-constants';
+import * as Device from 'expo-device';
 import MapView, { Circle, Marker, PROVIDER_GOOGLE } from 'react-native-maps';
 import { Accelerometer } from 'expo-sensors';
 import { CameraView, useCameraPermissions } from 'expo-camera';
@@ -30,11 +33,24 @@ import {
   loginAccount,
   logoutAccount,
   registerAccount,
+  registerPushToken,
+  sendTestPushNotification,
   setAuthToken,
   createTodo,
   getTodos,
   updateTodoStatus,
 } from './api';
+
+if (Platform.OS !== 'web') {
+  Notifications.setNotificationHandler({
+    handleNotification: async () => ({
+      shouldShowBanner: true,
+      shouldShowList: true,
+      shouldPlaySound: true,
+      shouldSetBadge: false,
+    }),
+  });
+}
 
 const COLORS = {
   background: '#F4F7FB',
@@ -55,6 +71,30 @@ const TABS = [
 ];
 
 const GEOFENCE_RADIUS_METERS = 250;
+const NOTIFICATION_SCREEN_ALIASES = {
+  home: 'home',
+  beranda: 'home',
+  history: 'history',
+  activity: 'history',
+  aktivitas: 'history',
+  plans: 'plans',
+  profile: 'profile',
+  profil: 'profile',
+  facilities: 'facilities',
+  'healthcare-facilities': 'facilities',
+  fasilitas: 'facilities',
+  request: 'request',
+  'emergency-request': 'request',
+  'new-request': 'request',
+};
+
+function getNotificationScreen(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  const requestedScreen = [payload.screen, payload.route, payload.destination, payload.target]
+    .find((value) => typeof value === 'string' && value.trim());
+  if (!requestedScreen) return null;
+  return NOTIFICATION_SCREEN_ALIASES[requestedScreen.trim().toLowerCase()] || null;
+}
 
 function distanceBetweenCoordinates(first, second) {
   const radians = (degrees) => (degrees * Math.PI) / 180;
@@ -188,7 +228,7 @@ function AuthField({ label, accessibilityLabel, ...inputProps }) {
   );
 }
 
-function HomeScreen({ onRequest, onHistory, onFacilities, onRefresh, history, historyLoading, historyError, userName }) {
+function HomeScreen({ onRequest, onHistory, onFacilities, onRefresh, history, historyLoading, historyError, userName, latestNotification }) {
   return (
     <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
       <View style={styles.homeHeader}>
@@ -196,7 +236,7 @@ function HomeScreen({ onRequest, onHistory, onFacilities, onRefresh, history, hi
           <Text style={styles.eyebrow}>SELAMAT PAGI 👋</Text>
           <Text style={styles.greeting}>{userName}</Text>
         </View>
-        <Pressable style={styles.notificationButton} onPress={() => Alert.alert('Notifikasi', 'Belum ada notifikasi baru.')}>
+        <Pressable style={styles.notificationButton} onPress={() => Alert.alert(latestNotification?.title || 'Notifikasi', latestNotification?.body || 'Belum ada notifikasi baru.')}>
           <Text style={styles.notificationIcon}>♧</Text>
           <View style={styles.notificationDot} />
         </Pressable>
@@ -970,7 +1010,7 @@ function TodoScreen({ onBack }) {
   );
 }
 
-function ProfileScreen({ user, onLogout, onOpenAccelerometer, onOpenCamera, onOpenTodos }) {
+function ProfileScreen({ user, onLogout, onOpenAccelerometer, onOpenCamera, onOpenTodos, onTestPushNotification, pushNotificationLoading }) {
   const menu = [
     { icon: '♙', label: 'Informasi pribadi' },
     { icon: '⌖', label: 'Alamat tersimpan' },
@@ -979,13 +1019,14 @@ function ProfileScreen({ user, onLogout, onOpenAccelerometer, onOpenCamera, onOp
     { icon: '⌁', label: 'Sensor accelerometer', onPress: onOpenAccelerometer },
     { icon: '▣', label: 'Kamera dokumentasi', onPress: onOpenCamera },
     { icon: '✓', label: 'Todo List Async', onPress: onOpenTodos },
+    { icon: '♧', label: 'Uji notifikasi push', onPress: onTestPushNotification },
     { icon: '⚙', label: 'Pengaturan aplikasi' },
   ];
   return (
     <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
       <View style={styles.pageHeader}><View><Text style={styles.eyebrow}>AKUN ANDA</Text><Text style={styles.pageTitle}>Profil</Text></View></View>
       <View style={styles.profileCard}><View style={styles.avatar}><Text style={styles.avatarText}>{user.fullName.slice(0, 1).toUpperCase()}</Text></View><Text style={styles.profileName}>{user.fullName}</Text><Text style={styles.profileEmail}>{user.email}</Text><Pressable onPress={() => Alert.alert('Profil', 'Akun MedRespons Anda sudah terhubung.')}><Text style={styles.editProfile}>Akun terverifikasi  ✓</Text></Pressable></View>
-      <View style={styles.menuCard}>{menu.map(({ icon, label, onPress }) => <Pressable key={label} style={styles.menuItem} onPress={onPress || (() => Alert.alert(label, 'Fitur ini akan tersedia pada pembaruan berikutnya.'))}><Text style={styles.menuIcon}>{icon}</Text><Text style={styles.menuLabel}>{label}</Text><Text style={styles.menuChevron}>›</Text></Pressable>)}</View>
+      <View style={styles.menuCard}>{menu.map(({ icon, label, onPress }) => <Pressable key={label} disabled={label === 'Uji notifikasi push' && pushNotificationLoading} style={styles.menuItem} onPress={onPress || (() => Alert.alert(label, 'Fitur ini akan tersedia pada pembaruan berikutnya.'))}><Text style={styles.menuIcon}>{icon}</Text><Text style={styles.menuLabel}>{label === 'Uji notifikasi push' && pushNotificationLoading ? 'Mengirim notifikasi…' : label}</Text><Text style={styles.menuChevron}>›</Text></Pressable>)}</View>
       <Pressable style={styles.logoutButton} onPress={onLogout}><Text style={styles.logoutText}>Keluar dari akun</Text></Pressable>
       <Text style={styles.versionText}>MedRespons · Versi 1.0.0</Text>
     </ScrollView>
@@ -1006,6 +1047,8 @@ export default function App() {
   const [authError, setAuthError] = useState('');
   const [authRegisterPrompt, setAuthRegisterPrompt] = useState(false);
   const [history, setHistory] = useState([]);
+  const [latestNotification, setLatestNotification] = useState(null);
+  const [pendingNotificationData, setPendingNotificationData] = useState(null);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [historyError, setHistoryError] = useState('');
   const [facilities, setFacilities] = useState([]);
@@ -1013,6 +1056,7 @@ export default function App() {
   const [facilitiesError, setFacilitiesError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [requestError, setRequestError] = useState('');
+  const [pushNotificationLoading, setPushNotificationLoading] = useState(false);
   const currentScreen = useMemo(() => {
     if (showRequest) return 'request';
     if (showFacilities) return 'facilities';
@@ -1060,6 +1104,39 @@ export default function App() {
     return () => { mounted = false; };
   }, []);
 
+  useEffect(() => {
+    if (Platform.OS === 'web') return undefined;
+    let active = true;
+    const saveNotification = (notification) => {
+      const content = notification?.request?.content;
+      if (!content) return;
+      setLatestNotification({
+        title: String(content.title || 'Notifikasi'),
+        body: String(content.body || ''),
+      });
+    };
+    const receivedSubscription = Notifications.addNotificationReceivedListener(saveNotification);
+    const handleNotificationResponse = (response) => {
+      if (!active) return;
+      saveNotification(response.notification);
+      const payload = response.notification?.request?.content?.data;
+      if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+        setPendingNotificationData(payload);
+      }
+      Notifications.clearLastNotificationResponseAsync().catch(() => {});
+    };
+    const responseSubscription = Notifications.addNotificationResponseReceivedListener(handleNotificationResponse);
+    Notifications.getLastNotificationResponseAsync()
+      .then((response) => { if (active && response) handleNotificationResponse(response); })
+      .catch(() => {});
+
+    return () => {
+      active = false;
+      receivedSubscription.remove();
+      responseSubscription.remove();
+    };
+  }, []);
+
   const loadHistory = useCallback(async () => {
     setHistoryLoading(true);
     setHistoryError('');
@@ -1088,6 +1165,27 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!pendingNotificationData || !authReady || !authUser) return;
+    const screen = getNotificationScreen(pendingNotificationData);
+    setPendingNotificationData(null);
+    if (!screen) return;
+
+    setShowRequest(false);
+    setShowFacilities(false);
+    setShowAccelerometer(false);
+    setShowCamera(false);
+    setShowTodos(false);
+    if (screen === 'request') {
+      setShowRequest(true);
+    } else if (screen === 'facilities') {
+      setShowFacilities(true);
+      loadFacilities('');
+    } else {
+      setActiveTab(screen);
+    }
+  }, [authReady, authUser, loadFacilities, pendingNotificationData]);
+
+  useEffect(() => {
     if (authReady && authUser) {
       loadHistory();
     } else if (authReady) {
@@ -1095,6 +1193,35 @@ export default function App() {
       setHistoryLoading(false);
     }
   }, [authReady, authUser, loadHistory]);
+
+  useEffect(() => {
+    if (!authReady || !authUser || !Device.isDevice || Platform.OS === 'web') return undefined;
+    let active = true;
+
+    const registerDeviceForNotifications = async () => {
+      try {
+        if (Platform.OS === 'android') {
+          await Notifications.setNotificationChannelAsync('default', {
+            name: 'default',
+            importance: Notifications.AndroidImportance.DEFAULT,
+          });
+        }
+
+        let permission = await Notifications.getPermissionsAsync();
+        if (!permission.granted) permission = await Notifications.requestPermissionsAsync();
+        if (!permission.granted || !active) return;
+
+        const projectId = Constants.easConfig?.projectId || Constants.expoConfig?.extra?.eas?.projectId;
+        const { data: token } = await Notifications.getExpoPushTokenAsync(projectId ? { projectId } : {});
+        if (active && token) await registerPushToken(token, Platform.OS);
+      } catch (error) {
+        console.warn('Registrasi push notification gagal:', error.message);
+      }
+    };
+
+    registerDeviceForNotifications();
+    return () => { active = false; };
+  }, [authReady, authUser?.id]);
 
   useEffect(() => {
     if (!authReady || !authUser || !['home', 'history'].includes(currentScreen)) return undefined;
@@ -1164,6 +1291,26 @@ export default function App() {
     }
   };
 
+  const sendPushTest = async () => {
+    setPushNotificationLoading(true);
+    try {
+      const result = await sendTestPushNotification(
+        'Uji notifikasi MedRespons',
+        'Push notification berhasil dikirim ke perangkat Anda.',
+        { screen: 'history' },
+      );
+      if (result?.data?.sent) {
+        Alert.alert('Notifikasi dikirim', 'Permintaan notifikasi diterima oleh layanan Expo. Periksa perangkat Anda.');
+      } else {
+        Alert.alert('Notifikasi gagal', 'Layanan push belum dapat mengirim notifikasi ke perangkat terdaftar.');
+      }
+    } catch (error) {
+      Alert.alert('Notifikasi gagal', error.message || 'Tidak dapat mengirim notifikasi. Coba lagi.');
+    } finally {
+      setPushNotificationLoading(false);
+    }
+  };
+
   const renderScreen = () => {
     if (currentScreen === 'request') return <RequestScreen onBack={() => setShowRequest(false)} onSubmit={sendRequest} isSubmitting={isSubmitting} submitError={requestError} />;
     if (currentScreen === 'facilities') return <FacilitiesScreen onBack={() => setShowFacilities(false)} facilities={facilities} loading={facilitiesLoading} error={facilitiesError} onRetry={loadFacilities} onSearch={loadFacilities} />;
@@ -1172,8 +1319,8 @@ export default function App() {
     if (currentScreen === 'todos') return <TodoScreen onBack={() => setShowTodos(false)} />;
     if (currentScreen === 'history') return <HistoryScreen history={history} loading={historyLoading} error={historyError} onRefresh={loadHistory} />;
     if (currentScreen === 'plans') return <PlansScreen />;
-    if (currentScreen === 'profile') return <ProfileScreen user={authUser} onLogout={signOut} onOpenAccelerometer={() => setShowAccelerometer(true)} onOpenCamera={() => setShowCamera(true)} onOpenTodos={() => setShowTodos(true)} />;
-    return <HomeScreen userName={authUser.fullName} history={history} historyLoading={historyLoading} historyError={historyError} onRefresh={loadHistory} onRequest={() => setShowRequest(true)} onFacilities={() => { setShowFacilities(true); loadFacilities(''); }} onHistory={() => setActiveTab('history')} />;
+    if (currentScreen === 'profile') return <ProfileScreen user={authUser} onLogout={signOut} onOpenAccelerometer={() => setShowAccelerometer(true)} onOpenCamera={() => setShowCamera(true)} onOpenTodos={() => setShowTodos(true)} onTestPushNotification={sendPushTest} pushNotificationLoading={pushNotificationLoading} />;
+    return <HomeScreen userName={authUser.fullName} history={history} historyLoading={historyLoading} historyError={historyError} latestNotification={latestNotification} onRefresh={loadHistory} onRequest={() => setShowRequest(true)} onFacilities={() => { setShowFacilities(true); loadFacilities(''); }} onHistory={() => setActiveTab('history')} />;
   };
 
   return (

@@ -98,6 +98,20 @@ export async function logoutAccount() {
   return request('/auth/logout', { method: 'POST' });
 }
 
+export async function registerPushToken(token, platform) {
+  return request('/push-tokens', {
+    method: 'POST',
+    body: JSON.stringify({ token, platform }),
+  });
+}
+
+export async function sendTestPushNotification(title, body, data = {}) {
+  return request('/push-notifications/test', {
+    method: 'POST',
+    body: JSON.stringify({ title, body, data }),
+  });
+}
+
 function formatDate(value) {
   if (!value) return 'Waktu tidak tersedia';
   const date = new Date(value);
